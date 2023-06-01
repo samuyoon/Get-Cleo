@@ -1,21 +1,17 @@
-import ast
-import json
-import os
+
 from slack_bolt import App
-import re
-import json
 import os
-import subprocess
 import time
 import openai
 import requests
 import logging
-from flask import Flask
+from flask import Flask, request
 from slack_bolt.adapter.flask import SlackRequestHandler
-from datetime import datetime
 
 
 
+flask_app = Flask(__name__)
+flask_app.config["PORT"] = int(os.environ.get("PORT", 8080))
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 gpt_model = 'gpt-4'
@@ -30,7 +26,6 @@ app = App(
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET")
 )
 
-flask_app = Flask(__name__)
 handler = SlackRequestHandler(app)
 
 
@@ -54,7 +49,7 @@ def auto_rate_limit_gpt(func):
                 time.sleep(60)
                 return func(*args, **kwargs)
             else:
-                kwargs['model'] = 'gpt-3.5-turbo'
+                kwargs['model'] = gpt_model
                 print(f"Hit rate limit error: {e} - rerunning the function with model: {kwargs['model']}")
                 return func(*args, **kwargs)
     return wrapper
@@ -115,7 +110,7 @@ def handle_message(event, client, say):
     print(f'message text is: {message_text}')
     is_sensitive = is_sensitive_message(message_text)
     print(f'is sensitive is: {str(is_sensitive)}')
-    if is_sensitive == 'ALERT SENSITIVE DATA IN MESSAGE FOUND':
+    if is_sensitive == 'true':
         create_slack_post_for_flagged_message(client, channel_id, sender_name, sent_time, False, None, message_permalink)
     return is_sensitive
 
@@ -125,7 +120,7 @@ def handle_message(event, client, say):
 # Passes the MESSAGE to OpenAI to determine if it contains sensitive data
 @auto_rate_limit_gpt
 def is_sensitive_message(message, model=gpt_model):
-    system_message = 'You are a sensitive data identifier. Analyze the following message. If the message contains sensitive data such as private keys, API keys or passwords, return a list of the sensitive data. If no sensitive data is found, return "false".'
+    system_message = 'You are a sensitive data identifier. Analyze the following message. If the message contains sensitive data such as private keys, API keys or passwords, return "true". If no sensitive data is found, return "false".'
     user_message = f'This is my message: {message}'
     messages = [{"role": "user", "content": user_message}, {"role": "system", "content": system_message}]
     response = openai.ChatCompletion.create(
@@ -134,20 +129,17 @@ def is_sensitive_message(message, model=gpt_model):
         max_tokens=2000,
         n=1,
         stop=None,
-        temperature=1,
+        temperature=.5,
     )
 
     print('open ai call was just hit')
     openai_response_message = response.choices[0].message['content']
+    print(f'open ai response message is: {openai_response_message}')
 
-    try:
-        evaluated_message = ast.literal_eval(openai_response_message)
-        if isinstance(evaluated_message, list):
-            return 'ALERT SENSITIVE DATA IN MESSAGE FOUND'
-    except (SyntaxError, ValueError):
-        pass
+    if openai_response_message.lower().strip() == 'true':
+        return 'true'
 
-    return 'No sensitive data found in MESSSAGE'
+    return 'false'
 
 @app.event("file_shared")
 def handle_file_shared(payload, client, say):
@@ -264,11 +256,11 @@ def health():
 def slack_events():
     return handler.handle(request)
 
-# if __name__ == "__main__":
-#     app.start(port=int(os.environ.get("PORT", 8080)))  # default Cloud Run port is 8080
-
-
-
 if __name__ == "__main__":
-    app.start(port=int(os.environ.get("PORT", 3000)))  # default Cloud Run port is 8080
+    flask_app.run(host="0.0.0.0", port=os.getenv('PORT', '8080'))  # default Cloud Run port is 8080
+
+
+
+# if __name__ == "__main__":
+#     app.start(port=int(os.environ.get("PORT", 3000)))  # testing only
 

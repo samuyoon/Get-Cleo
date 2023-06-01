@@ -1,0 +1,18 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: cleo-slack-service
+spec:
+  template:
+    spec:
+      containers:
+        - image: gcr.io/donatenow-388217/cleo-app-image:v1
+          env:
+            - name: PORT
+              value: "8080" # Update to match your application's port configuration
+            - name: OPENAI_API_KEY
+              value: "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"
+            - name: SLACK_BOT_TOKEN
+              value: "xoxb-5315816251861-5304247088775-R0oJRp6aARrJtXWMVhYi1p3U"
+            - name: SLACK_SIGNING_SECRET
+              value: "a2c8be465b37ce852415e7eb14c50f8f"

@@ -1,4 +1,6 @@
 slack-bolt==1.5.0
 openai==0.27.0
 requests==2.25.1
-flask==2.0.2
+cryptography
+supabase==1.0.3
+

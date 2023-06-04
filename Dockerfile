@@ -22,7 +22,3 @@ COPY . /app
 
 # Set the entrypoint
 CMD ["python3", "app.py"]
-
-# CLI deploy command below:
-# gcloud run deploy cleo-slack-service --platform managed --region us-central1 --source=/Users/samyoon/Development/slack_apps/alert_bot --set-env-vars OPENAI_API_KEY=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,SLACK_BOT_TOKEN=xoxb-5315816251861-5304247088775-R0oJRp6aARrJtXWMVhYi1p3U,SLACK_SIGNING_SECRET=a2c8be465b37ce852415e7eb14c50f8f
-

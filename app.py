@@ -1,85 +1,60 @@
-
 from slack_bolt import App
+from cryptography.fernet import Fernet
+from supabase import create_client, Client
 import os
 import time
-import openai
 import requests
-import logging
-from flask import Flask, request
-from slack_bolt.adapter.flask import SlackRequestHandler
+from requests.exceptions import RequestException
+from slack_bolt.request import BoltRequest
+from slack_bolt.response import BoltResponse
+from slack_sdk.web import WebClient
+from cryptography.fernet import Fernet
+from typing import Callable
+
+from util import create_slack_post_for_flagged_message, is_sensitive_file, is_sensitive_message
 
 
+# setup supabase client
+url: str = os.environ.get('SUPABASE_URL')
+key: str = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+supabase: Client = create_client(url, key)
 
-flask_app = Flask(__name__)
-flask_app.config["PORT"] = int(os.environ.get("PORT", 8080))
+# setup encryption
+cipher_key = os.environ.get('FERNET_KEY')
+cipher_suite = Fernet(cipher_key)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-gpt_model = 'gpt-4'
+# Middleware for fetching and decrypting bot token
+def fetch_bot_token(req: BoltRequest, resp: BoltResponse, next: Callable[[], None]) -> None:
+    team_id = req.body.get("team", {}).get("id")
+    if team_id:
+        response = supabase.from_("slack_tokens")\
+                           .select("encrypted_access_token, created_at")\
+                           .eq("team_id", team_id)\
+                           .order("created_at", ascending=False)\
+                           .limit(1).execute()
+        encrypted_bot_token = response.get("data", [{}])[0].get("encrypted_access_token")
+        bot_token = cipher_suite.decrypt(encrypted_bot_token).decode()
+        req.context["bot_token"] = bot_token  # Store the token in context
 
-if OPENAI_API_KEY is None:
-    raise EnvironmentError("OPENAI_API_KEY not found in environment variables")
-else:
-    openai.api_key = OPENAI_API_KEY
+        # Set the client's token here
+        req.context["client"].token = bot_token
+    next()  
 
+# Initialize the Slack Bolt App using the decrpted bot token from supabase
 app = App(
-    token=os.environ.get("SLACK_BOT_TOKEN"),
-    signing_secret=os.environ.get("SLACK_SIGNING_SECRET")
+    # token is not provided here anymore
+    signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
+    process_before_response=True,
+    raise_error_for_unhandled_request=True,
 )
 
-handler = SlackRequestHandler(app)
+app.use(fetch_bot_token)  # Attach the middleware to the app
 
 
-logger = logging.getLogger(__name__)
-
-class ExcludedFileExtensionError(Exception):
-    pass
-
-# dummy function to catch these events in case we want to do something with this
-@app.event("file_created")
-def handle_file_created_events(body, logger):
-    logger.info(body)
-
-def auto_rate_limit_gpt(func):
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except openai.error.RateLimitError as e:
-            if kwargs.get('rate_limit_mode','wait'):
-                print(f"Hit rate limit error: {e} - waiting 1 minute and rerunning the function")
-                time.sleep(60)
-                return func(*args, **kwargs)
-            else:
-                kwargs['model'] = gpt_model
-                print(f"Hit rate limit error: {e} - rerunning the function with model: {kwargs['model']}")
-                return func(*args, **kwargs)
-    return wrapper
-
-def create_slack_post_for_flagged_message(client, channel_id, sender_name, sent_time, has_file=False, file_name="", message_link=""):
-    if has_file:
-        message_text = f"*ALERT :warning:*\n\nA sensitive file (`{file_name}`) was sent by {sender_name}. You can view and delete the original message here: {message_link}"
-    else:
-        message_text = f"*ALERT :warning:*\n\nA sensitive message was sent by {sender_name}. You can view and delete the original message here: {message_link}"
-
-    message = {
-        "text": message_text,  # Include the text argument
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": message_text
-                }
-            }
-        ]
-    }
-    client.chat_postMessage(channel=channel_id, **message)
-
-
-
-
-# Receives the initial MESSAGE
 @app.event("message")
-def handle_message(event, client, say):
+def handle_messages(event, context, say, logger):
+    bot_token = context["bot_token"]
+    client = WebClient(token=bot_token)
     message_text = event['text']
     if not message_text:
         return  # Skip further processing if message is empty
@@ -89,7 +64,7 @@ def handle_message(event, client, say):
     channel_id = event['channel']
 
     # Get user's real name
-    user_info = client.users_info(user=user_id)
+    user_info = client.users_info(user=user_id).data
     sender_name = user_info['user']['profile']['real_name']
 
     # Introduce a small delay (e.g., 1 second)
@@ -99,47 +74,27 @@ def handle_message(event, client, say):
         # Get permalink of the message
         permalink_info = client.chat_getPermalink(channel=channel_id, message_ts=sent_time)
         if not permalink_info["ok"]:
-            print(f"Failed to retrieve permalink for the message: {permalink_info['error']}")
+            logger.error(f"Failed to retrieve permalink for the message: {permalink_info['error']}")
             return
 
         message_permalink = permalink_info['permalink']
     except Exception as e:
-        print(f"Error occurred while retrieving message permalink: {str(e)}")
+        logger.error(f"Error occurred while retrieving message permalink: {str(e)}")
         return
 
-    print(f'message text is: {message_text}')
+    logger.info(f'message text is: {message_text}')
     is_sensitive = is_sensitive_message(message_text)
-    print(f'is sensitive is: {str(is_sensitive)}')
+    logger.info(f'is sensitive is: {str(is_sensitive)}')
     if is_sensitive == 'true':
         create_slack_post_for_flagged_message(client, channel_id, sender_name, sent_time, False, None, message_permalink)
     return is_sensitive
 
+@app.event("file_created")
+def handle_file_created_events(body, logger):
+    logger.info(body)
 
-
-
-# Passes the MESSAGE to OpenAI to determine if it contains sensitive data
-@auto_rate_limit_gpt
-def is_sensitive_message(message, model=gpt_model):
-    system_message = 'You are a sensitive data identifier. Analyze the following message. If the message contains sensitive data such as private keys, API keys or passwords, return "true". If no sensitive data is found, return "false".'
-    user_message = f'This is my message: {message}'
-    messages = [{"role": "user", "content": user_message}, {"role": "system", "content": system_message}]
-    response = openai.ChatCompletion.create(
-        model=model,
-        messages=messages,
-        max_tokens=2000,
-        n=1,
-        stop=None,
-        temperature=.5,
-    )
-
-    print('open ai call was just hit')
-    openai_response_message = response.choices[0].message['content']
-    print(f'open ai response message is: {openai_response_message}')
-
-    if openai_response_message.lower().strip() == 'true':
-        return 'true'
-
-    return 'false'
+class ExcludedFileExtensionError(Exception):
+    pass
 
 @app.event("file_shared")
 def handle_file_shared(payload, client, say):
@@ -204,63 +159,95 @@ def handle_file_shared(payload, client, say):
         create_slack_post_for_flagged_message(client, channel_id, sender_name, message_ts, True, file_name, message_permalink)
     return is_sensitive
 
+@app.event("http")
+def start(event, say):
+    if event["path"] == "/_ah/start" and event["httpMethod"] == "GET":
+        say({"status": "Healthy"})
 
+@app.event("http")
+def health(event, say):
+    if event["path"] == "/_ah/health" and event["httpMethod"] == "GET":
+        say({"status": "Healthy"})
 
+@app.event("http")
+def exchange_code(event, say):
+    if event["path"] == "/exchange-code" and event["httpMethod"] == "POST":
+        data = event["body"]
+        code = data.get('code')
 
+        try:
+            # Make a POST request to Slack's API
+            response = requests.post('https://slack.com/api/oauth.v2.access', data={
+                'client_id': os.getenv('SLACK_CLIENT_ID'),
+                'client_secret': os.getenv('SLACK_CLIENT_SECRET'),
+                'code': code,
+            })
 
-@auto_rate_limit_gpt
-def is_sensitive_file(file_name, file_contents, model=gpt_model):
-    print('OpenAI is analyzing file contents. This may take a few minutes.')
-    system_message = 'You are a sensitive data identifier. Analyze the following file contents. If the file contains sensitive data that should not be shared publicly such as, but not limited to, private keys, API keys, pem files, or credit card numbers, return "true". If no sensitive data is found, return "false".'
-    user_message = f'This is the contents of the file named "{file_name}":\n{file_contents}'
-    messages = [{"role": "user", "content": user_message}, {"role": "system", "content": system_message}]
+            # Check if the request was successful
+            response.raise_for_status()
 
-    try:
-        response = openai.ChatCompletion.create(
-            model=model,
-            messages=messages,
-            max_tokens=2000,
-            n=1,
-            stop=None,
-            temperature=.5,
-        )
-    except openai.error.OpenAIError as e:
-        print(f"An error occurred with OpenAI: {e}")
-        return 'Error during processing'
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return 'Unexpected error during processing'
+        except RequestException as e:
+            say({
+                'text': 'Failed to retrieve the access token from Slack.',
+                'response_type': 'ephemeral'
+            })
+            raise e  # Raise the exception for logging and debugging
 
-    openai_response_message = response.choices[0].message['content']
-    print(f"Model's response: {openai_response_message}")
+        slack_data = response.json()
 
-    if openai_response_message.lower().strip() == 'true':
-        return 'true'
+        # Check if Slack returned an error
+        if not slack_data.get('ok', False):
+            error_message = slack_data.get('error', 'No error message returned from Slack.')
+            say({
+                'text': f'Slack API returned an error: {error_message}',
+                'response_type': 'ephemeral'
+            })
+            return
 
-    return 'false'
+    print(slack_data)
 
+    # Extract the access token from the response
+    access_token = slack_data.get('access_token')
+    if not access_token:
+        return {'message': f'Access token not found in Slack response.'}, 500
 
+    # Encrypt the access token
+    cipher_text = cipher_suite.encrypt(access_token.encode())
 
+    # Store the encrypted access token in your database, associated with the user who authenticated
+    authed_user = slack_data.get('authed_user', {})
+    user_id = authed_user.get('id')
+    scope = authed_user.get('scope')
+    token_type = authed_user.get('token_type')
+    if not user_id or not scope or not token_type:
+        return {'message': f'Missing data in authed_user field.'}, 500
 
+    team = slack_data.get('team', {})
+    team_id = team.get('id')
+    if not team_id:
+        return {'message': f'Missing team id in Slack response.'}, 500
 
-@flask_app.route("/_ah/start", methods=["GET"])
-def start():
-    return {"status": "Healthy"}
+    data, count = supabase.table("slack_tokens").insert({
+        "slack_user_id": user_id,
+        "encrypted_access_token": cipher_text.decode(),
+        "team_id": team_id,
+        "scope": scope,
+        "token_type": token_type
+    }).execute()
 
-@flask_app.route("/_ah/health", methods=["GET"])
-def health():
-    return {"status": "Healthy"}
+    # if no rows were inserted in supabase
+    if count==0:
+        return {'message': f'Slack Access Code was not successfully saved. Email support@getcleo.io with this error in subject line.'}, 500
 
-# Handle Slack events
-@flask_app.route("/slack/events", methods=["POST"])
-def slack_events():
-    return handler.handle(request)
+    say({
+        'text': 'Success! You will be redirected shortly...',
+        'response_type': 'in_channel'
+    })
 
 if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=os.getenv('PORT', '8080'))  # default Cloud Run port is 8080
+    app.start(port=int(os.getenv('PORT', 8080)))
 
 
 
 # if __name__ == "__main__":
-#     app.start(port=int(os.environ.get("PORT", 3000)))  # testing only
-
+#     app.start(port=int(os.environ.get("PORT", 3000)))

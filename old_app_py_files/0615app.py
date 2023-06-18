@@ -7,7 +7,7 @@ from slack_bolt import App
 from requests.exceptions import RequestException
 from cryptography.fernet import Fernet
 from flask import Flask, redirect, request, jsonify, make_response, after_this_request
-from util import basically_summarize, create_slack_post_for_flagged_message, is_sensitive_file, is_sensitive_message, generate_app_mention_reply, generate_treat_reply, gpt_generate_reply, gpt_generate_catchmeup, gpt_generate_doc
+from util import create_slack_post_for_flagged_message, is_sensitive_file, is_sensitive_message, generate_app_mention_reply, generate_treat_reply, gpt_generate_reply, gpt_generate_catchmeup
 from slack_bolt.adapter.flask import SlackRequestHandler
 import logging
 import base64
@@ -15,11 +15,6 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from datetime import datetime
 import threading
-import json
-from hashlib import sha256
-import hmac
-import time
-
 
 
 # Intro message DM'd to user who installed Cleo-- note  that only "Woof! I'm Cleo :dog:" must remain the same to catch feature_vote reactions
@@ -35,11 +30,10 @@ intro_message = ('*Woof! I\'m Cleo :dog:*\n\n'
                  '`/suggestnewtrick`: If you have an idea for a new trick I could learn, let me know with this command!\n\n'
                  '*Upcoming Tricks:*\n'
                  'What should I learn next?\n'
-                 ':calendar: Conversation Highlights: Cleo could identify and highlight important or significant messages within a conversation.\n\n'
-                 ':spiral_note_pad: Automatic Follow-up Reminders: Cleo could passively monitor conversations and automatically remind users to follow up on specific discussions or tasks after a certain period of time.\n\n'
-                 ':tada: Automated Kudos Generator: Cleo could passively analyze conversations and interactions within channels to recognize when someone deserves recognition or a kudos.\n\n'
+                 ':calendar: Conversation Highlights: Cleo could identify and highlight important or significant messages within a conversation. <https://getcleo.io/feature-votes?choice=conversation-highlights|Link>\n\n'
+                 ':spiral_note_pad: Automatic Follow-up Reminders: Cleo could passively monitor conversations and automatically remind users to follow up on specific discussions or tasks after a certain period of time. <https://getcleo.io/feature-votes?choice=folowup-remind|Link>\n\n'
+                 ':tada: Automated Kudos Generator: Cleo could passively analyze conversations and interactions within channels to recognize when someone deserves recognition or a kudos. <https://getcleo.io/feature-votes?choice=kudos-generator|Link>\n\n'
                  'Got a new trick in mind? Use `/suggestnewtrick`!')
-
 
 
 
@@ -146,7 +140,26 @@ def get_app(team_id):
             reply = generate_treat_reply(message_text)
             logger.info("Thanks for the treat!")
             say(reply, channel=channel_id)
+        else:
+            # If the message is neither directed to Cleo or a treat for Cleo, check if it is a sensitive message.
+            is_sensitive = is_sensitive_message(message_text)
+            logger.info(f'is sensitive is: {str(is_sensitive)}')
+            if is_sensitive == 'true':
+                try:
+                    # Retrieve permalink of the message
+                    permalink_info = client.chat_getPermalink(channel=channel_id, message_ts=sent_time)
+                    if not permalink_info["ok"]:
+                        logger.error(f"Failed to retrieve permalink for the message: {permalink_info['error']}")
+                        return
 
+                    message_permalink = permalink_info['permalink']
+                except Exception as e:
+                    logger.error(f"Error occurred while retrieving message permalink: {str(e)}")
+                    return
+
+                create_slack_post_for_flagged_message(client, install_user_id, sender_name, sent_time, False, None, message_permalink)
+            else:
+                logger.info(f"not sensitive")
 
 
 
@@ -172,47 +185,64 @@ def get_app(team_id):
         user_info = client.users_info(user=user_id)
         sender_name = user_info['user']['profile']['real_name']
 
-        
+        try:
+            # Get the message information
+            event_ts = payload["event_ts"]
+            message = client.conversations_history(
+                channel=channel_id,
+                inclusive='true',
+                oldest=event_ts,
+                limit=1)
+            print('message is: ' + str(message))
+            message_ts = message["messages"][0]["ts"]
+            print('payload is: ' + str(payload))
+
+            # Get permalink of the message
+            permalink_info = client.chat_getPermalink(channel=channel_id, message_ts=message_ts)
+            if not permalink_info["ok"]:
+                print(f"Failed to retrieve permalink for the message: {permalink_info['error']}")
+                # Use fallback message with just the timestamp
+                message_permalink = f"https://slack.com/archives/{channel_id}/p{message_ts.replace('.', '')}"
+            else:
+                message_permalink = permalink_info['permalink']
+        except Exception as e:
+            print(f"Error occurred while retrieving message permalink: {str(e)}")
+            # Use fallback message with just the timestamp
+            message_permalink = f"https://slack.com/archives/{channel_id}/p{message_ts.replace('.', '')}"
+
+        excluded_extensions = [
+            ".jpg", ".png", ".jpeg", ".gif", ".bmp", ".ico", ".tif", ".tiff", ".raw",
+            ".mp3", ".wav", ".ogg", ".flac", ".aac",
+            ".mp4", ".mov", ".avi", ".mkv", ".flv", ".wmv",
+            ".obj", ".fbx", ".dae", ".3ds", ".x3d",
+            ".exe", ".dll", ".so", ".bat", ".sh",
+            ".db", ".accdb", ".mdb", ".sqlite"
+        ]
+
+        file_extension = os.path.splitext(file_name)[1]
+        if file_extension in excluded_extensions:
+            raise ExcludedFileExtensionError(f"Cannot process file with extension {file_extension}")
+
+        response = requests.get(file_url, headers={"Authorization": f"Bearer {encrypted_access_token}"})
+        file_content = response.text
+        print('file content is: ' + file_content)
+
+        is_sensitive = is_sensitive_file(file_name, file_content)
+        print('is sensitive is: ' + str(is_sensitive))
+        if is_sensitive == 'true':
+            create_slack_post_for_flagged_message(client, install_user_id, sender_name, message_ts, True, file_name, message_permalink)
+        return is_sensitive
+
 
     @app.event("reaction_added")
     def handle_feature_vote_reaction(client, body, logger):
         logger.info(f"feature vote reaction body is: {body}")
         # Define emoji-feature mapping
         emoji_feature_map = {
-            "1️⃣": "Conversation Highlights: Cleo could identify and highlight important or significant messages within a conversation.",
-            "one": "Conversation Highlights: Cleo could identify and highlight important or significant messages within a conversation.",
-            "2️⃣": "Automatic Follow-up Reminders: Cleo could passively monitor conversations and automatically remind users to follow up on specific discussions or tasks after a certain period of time.",
-            "two": "Automatic Follow-up Reminders: Cleo could passively monitor conversations and automatically remind users to follow up on specific discussions or tasks after a certain period of time.",
-            "3️⃣": "Automated Kudos Generator: Cleo could passively analyze conversations and interactions within channels to recognize when someone deserves recognition or a kudos.",
-            "three": "Automated Kudos Generator: Cleo could passively analyze conversations and interactions within channels to recognize when someone deserves recognition or a kudos.",
+            "1️⃣": "Automatically create useful documents based on channel content",
+            "2️⃣": "Delay the send of a Slack message to a specific date and time",
+            "3️⃣": "Use `/catchmeup` to have Cleo send you (privately) a summary of the discussion ",
         }
-        emoji_treat_map = {
-            "bacon": "Bacon! My favorite!",
-            "cut_of_meat": "Steak, delicious and nutritious!",
-            "meat_on_bone": "Mmm, meat on a bone. A classic!",
-            "hamburger": "A burger? Well, I'm not usually allowed, but just this once...",
-            "pizza": "Pizza, you say? I could get used to this human food!",
-            "hot_dog": "Hot dog! Can't resist that one!",
-            "cheese_wedge": "Cheese? Yes, please!",
-            "cookie": "Cookie! I promise to eat it slowly...",
-            "apple": "An apple a day keeps the vet away!",
-            "carrot": "A carrot! Great for my teeth.",
-            "bread": "Bread, soft and yummy!",
-            "fries": "Fries? I promise I won't tell the vet...",
-            "ice_cream": "Ice cream? Oh, it's my lucky day!",
-            "doughnut": "A donut! Sweet and delicious!",
-            "green_apple": "An apple? Crunchy and sweet!",
-            "banana": "A banana? It's not exactly a bone, but I'll take it!",
-            "grapes": "Grapes? These are usually off-limits, but I'll make an exception...",
-            "watermelon": "Watermelon? I love the crunch!",
-            "strawberry": "Strawberries? What a sweet treat!",
-            "poultry_leg": "Chicken? That's top-tier treat!",
-            "peanuts": "Peanuts? What an interesting flavor!",
-            "ear_of_corn": "Corn? A surprising treat, but I'll give it a try!",
-            "poultry_leg": "Chicken is my favorite! Yum Yum!"
-        }
-
-
 
         # Get the item.channel and the item.ts from the body
         item = body["event"]["item"]
@@ -222,32 +252,18 @@ def get_app(team_id):
         # Fetch message
         response = client.conversations_history(channel=channel_id, 
                                                 inclusive=True, 
-                                                oldest=message_ts, 
+                                                latest=message_ts, 
                                                 limit=1)
-        message = response['messages'][0]
-        logger.info(f"associated message text is: {message['text']}")
+        logger.info(f"associated message text is: {response['messages'][0]['text']}")
 
-        # Check the message to see if it was posted by "cleoai" or "Cleo AI"
-        user_info = client.users_info(user=message['user'])
-        logger.info(f"user name is: {user_info['user']['name']}")
-
-        if user_info["ok"] and user_info["user"]["name"].lower() in ['cleoai', 'cleo ai']:
-            # Get the reaction 
+        # Check the message to see if it contains the intro message text
+        intro_text = "Woof! I'm Cleo :dog:"
+        if response["messages"] and intro_text in response["messages"][0]["text"]:
+            # Get the reaction and map it to a feature
             reaction = body["event"]["reaction"]
-            logger.info(f"reaction is: {reaction}")
-
-            # Check the reaction and the message content
-            if reaction in emoji_treat_map:
-                # Send a reply to the user if the reaction is a treat emoji
-                treat_response = emoji_treat_map[reaction]
-                client.chat_postMessage(channel=channel_id,
-                                        text=treat_response,
-                                        thread_ts=message_ts)
-            elif reaction in emoji_feature_map and message['text'] and "Woof! I'm Cleo :dog:" in message['text']:
-                logger.info("detected intro message")
-                # Map reaction to a feature
+            if reaction in emoji_feature_map:
                 voted_feature = emoji_feature_map[reaction]
-                logger.info(f"voted_feature is: {voted_feature}")
+
                 # Insert reaction data into "feature_votes" table
                 data = {"slack_user_id": body["event"]["user"], 
                         "team_id": body["team_id"], 
@@ -258,245 +274,8 @@ def get_app(team_id):
                 client.chat_postMessage(channel=channel_id, 
                                     text="It's on Cleo's curriculum! ",
                                     thread_ts=message_ts)
-            else:
-                # Generate a reply using the generate_treat_reply function regardless of the message content as long as the reaction is on cleo's message
-                treat_response = generate_treat_reply(reaction)
-                client.chat_postMessage(channel=channel_id,
-                                        text=treat_response,
-                                        thread_ts=message_ts)
 
-
-    @app.event("app_home_opened")
-    def update_home_tab(client, event, logger):
-        logger.info(f"update_home_tab called with event: {event}")
-
-        try:
-            client.views_publish(
-                user_id=event["user"],
-                view={
-                    "type": "home",
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": "*Welcome home, <@" + event["user"] + ">!*"
-                            }
-                        },
-                        {
-                            "type": "actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Generate Document"
-                                    },
-                                    "value": "generate_document",
-                                    "action_id": "button_generate_document"
-                                },
-                                # Add more buttons for different actions
-                                # ...
-                            ]
-                        }
-                    ]
-                }
-            )
-        except Exception as e:
-            logger.error(f"Error publishing home tab: {e}")
-
-    @app.action("button_generate_document")
-    def open_modal(ack, body, client):
-        ack()
-
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view={
-                "type": "modal",
-                "callback_id": "modal_callback_id",
-                "title": {
-                    "type": "plain_text",
-                    "text": "Document Generator"
-                },
-                "blocks": [
-                    {
-                        "type": "input",
-                        "block_id": "context_input_block",
-                        "label": {
-                            "type": "plain_text",
-                            "text": "Dump your context here:"
-                        },
-                        "element": {
-                            "type": "plain_text_input",
-                            "action_id": "context_input_action",
-                            "multiline": True
-                        }
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "radio_buttons_block",
-                        "label": {
-                            "type": "plain_text",
-                            "text": "Choose document type"
-                        },
-                        "element": {
-                            "type": "radio_buttons",
-                            "options": [
-                                {
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Roadmap"
-                                    },
-                                    "value": "roadmap"
-                                },
-                                {
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Meeting Summary"
-                                    },
-                                    "value": "meeting_summary"
-                                }
-                                # Add more options for different document types
-                                # ...
-                            ],
-                            "action_id": "radio_buttons_action"
-                        }
-                    }
-                ],
-                "submit": {
-                    "type": "plain_text",
-                    "text": "Submit"
-                }
-            }
-        )
-
-
-
-
-    @app.view("modal_callback_id")
-    def handle_view_submission(ack, body, client, logger):
-        ack()
-
-        user_id = body["user"]["id"]
-        context_input_value = body["view"]["state"]["values"]["context_input_block"]["context_input_action"]["value"]
-        document_type = body["view"]["state"]["values"]["radio_buttons_block"]["radio_buttons_action"]["selected_option"]["value"]
-
-        try:
-            # Call the gpt_generate_doc function to generate the document
-            generated_document = gpt_generate_doc(context_input_value, document_type)
-            logger.info(f"generated doc contents: {generated_document}")
-
-            # Update the home tab with the generated document
-            client.views_publish(
-                user_id=user_id,
-                view={
-                    "type": "home",
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Welcome home, <@{user_id}>!*"
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "block_id": "cleo_output_block",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Cleo Output:*\n{generated_document}"  # Display the generated document
-                            }
-                        },
-                        {
-                            "type": "actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Retry"
-                                    },
-                                    "action_id": "button_retry"
-                                }
-                            ]
-                        }
-                    ]
-                }
-            )
-
-        except Exception as e:
-            logger.error(f"Error generating or sending document: {e}")
-
-
-    @app.action("button_retry")
-    def handle_retry_button_press(ack, body, client):
-        # Acknowledge the action
-        ack()
-
-        # Reopen the modal by calling the open_modal function
-        open_modal(ack, body, client)
-
-
-
-    @app.action("button_clear_output")
-    def handle_clear_output_button_press(ack, body, client, logger):
-        # Acknowledge the action
-        ack()
-
-        user_id = body["user"]["id"]
-
-        # Update the home tab to clear the output section
-        try:
-            client.views_publish(
-                user_id=user_id,
-                view={
-                    "type": "home",
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Welcome home, <@{user_id}>!*"
-                            }
-                        },
-                        {
-                            "type": "actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Generate Document"
-                                    },
-                                    "action_id": "button_generate_document"
-                                },
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Clear Output"
-                                    },
-                                    "action_id": "button_clear_output"
-                                },
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Retry"
-                                    },
-                                    "action_id": "button_retry"
-                                }
-                            ]
-                        }
-                    ]
-                }
-            )
-        except Exception as e:
-            logger.error(f"Error clearing output: {e}")
-
-
-
-
+    # End of @app.event("reaction_added")
 
     # Store the app for future use
     apps[team_id] = app
@@ -512,62 +291,12 @@ def get_app(team_id):
 def slack_events():
     # Get the team_id from the Slack event payload
     team_id = request.json.get("team_id")
-    logging.info(f"/slack/events payload is: {request.json}")
     logging.info(f"Received Slack event for team_id: {team_id}")
-
-    # Add this log statement
-    logging.info(f"Event type: {request.json.get('event', {}).get('type')}")
-
+    
     app = get_app(team_id)
-
+    
     handler = SlackRequestHandler(app)
     return handler.handle(request)
-
-
-
-
-@flask_app.route("/slack/interactivity", methods=["POST"])
-def slack_interactivity():
-    logging.info(f"Started slack interactivity codeblock")
-
-    # Extract the signature and timestamp from headers
-    slack_signature = request.headers.get("X-Slack-Signature", "")
-    slack_request_timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-
-    # Verify the request timestamp to prevent replay attacks
-    if abs(time.time() - int(slack_request_timestamp)) > 60 * 5:
-        # If the timestamp is older than five minutes, reject the request
-        return "Invalid request timestamp", 401
-
-    # Form the base string by concatenating the version, timestamp and the raw payload
-    req = str.encode(f"v0:{slack_request_timestamp}:{request.get_data(as_text=True)}")
-
-    # Create a new HMAC using the secret as the key and SHA-256 as the digest
-    hmac_obj = hmac.new(bytes(os.environ.get("SLACK_SIGNING_SECRET"), 'utf-8'), req, sha256)
-
-    # Calculate the HMAC
-    my_signature = "v0=" + hmac_obj.hexdigest()
-
-    # Compare the HMACs
-    if not hmac.compare_digest(my_signature, slack_signature):
-        # If they don't match, reject the request
-        return "Invalid request signature", 401
-
-    # If we reach here, the request is valid. Parse the payload
-    data = json.loads(request.form.get("payload"))
-    logging.info(f"If we reach here, the request is valid. Parse the payload")
-
-
-    # Get the team_id from the Slack event payload
-    team_id = data.get("team", {}).get("id")
-    logging.info(f"Team id from payload is: {team_id}")
-
-    # Initialize Slack App
-    app = get_app(team_id)
-
-    handler = SlackRequestHandler(app)
-    return handler.handle(request)
-
 
 
 
@@ -649,37 +378,36 @@ def exchange_code():
 
 
     try:
-        # Post the intro message as a DM to the user
         response = slack_client.chat_postMessage(channel=user_id, text=intro_message)
         logging.info(f'slack_client.chat_postMessage(channel={user_id}, text={intro_message})')
         intro_message_ts = response["ts"]
 
         # Get a list of all public channels
-        # public_channels_response = slack_client.conversations_list(types="public_channel")
-        # logging.info(f'slack_client.conversations_list(types="public_channel") resulted in: {public_channels_response}')
+        public_channels_response = slack_client.conversations_list(types="public_channel")
+        logging.info(f'slack_client.conversations_list(types="public_channel") resulted in: {public_channels_response}')
 
-        # # If the request was successful, extract the channels
-        # if public_channels_response.get('ok'):
-        #     public_channels = public_channels_response['channels']
+        # If the request was successful, extract the channels
+        if public_channels_response.get('ok'):
+            public_channels = public_channels_response['channels']
 
-        #     # Initialize an empty list to hold channel IDs
-        #     public_channel_ids = []
+            # Initialize an empty list to hold channel IDs
+            public_channel_ids = []
 
-        #     # Add bot to all public channels
-        #     for channel in public_channels:
-        #         public_channel_ids.append(channel['id'])  # Store the channel ID
-        #         try:
-        #             # Get the list of members of the channel
-        #             channel_members = slack_client.conversations_members(channel=channel["id"])["members"]
+            # Add bot to all public channels
+            for channel in public_channels:
+                public_channel_ids.append(channel['id'])  # Store the channel ID
+                try:
+                    # Get the list of members of the channel
+                    channel_members = slack_client.conversations_members(channel=channel["id"])["members"]
 
-        #             # If the bot is not already a member of the channel, join it
-        #             if bot_user_id not in channel_members:
-        #                 response_join = slack_client.conversations_join(channel=channel["id"])
-        #                 logging.info(f'slack_client.conversations_join(channel={channel["id"]}) resulted in: {response_join}')
+                    # If the bot is not already a member of the channel, join it
+                    if bot_user_id not in channel_members:
+                        response_join = slack_client.conversations_join(channel=channel["id"])
+                        logging.info(f'slack_client.conversations_join(channel={channel["id"]}) resulted in: {response_join}')
                         
-        #         except SlackApiError as e:
-        #             logging.error(f"Error adding bot to channel {channel['name']}: {e}")
-        #             continue
+                except SlackApiError as e:
+                    logging.error(f"Error adding bot to channel {channel['name']}: {e}")
+                    continue
 
     except SlackApiError as e:
         logging.error(f"Error creating new channel or inviting users: {e}")
@@ -984,32 +712,6 @@ def process_request_and_send_catchmeup(slack_user_id, team_id, channel_id, respo
     #         logging.error(f"Failed to send the final response to Slack: {e}")
     # else:
     #     logging.error("No reply data found in execute_result.data")
-
-
-
-# Endpoint for Basically Summarize Chrome Extension
-@flask_app.route('/chromeextension', methods=['POST'])
-def handle_basically_summarize_request():
-    # parse the request payload
-    payload = request.get_json()
-    logging.info(f"request payload is: {payload}")
-
-
-    # store the selectedText from the payload in selected_text variable
-    selected_text = payload.get('selectedText')
-
-    summarized_text = basically_summarize(selected_text)
-    logging.info(f"summarized_text is: {summarized_text}")
-
-
-    # respond to the chrome extension front end with the summarized_text
-    return jsonify({
-        'summarizedText': summarized_text
-    })
-
-
-
-
 
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=os.getenv('PORT', '8080'))  # default Cloud Run port is 8080

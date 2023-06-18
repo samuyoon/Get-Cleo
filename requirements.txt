@@ -3,4 +3,4 @@ openai==0.27.0
 requests==2.25.1
 cryptography
 supabase==1.0.3
-
+Flask

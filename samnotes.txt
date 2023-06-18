@@ -1,0 +1,23 @@
+
+# CLI deploy command below:
+gcloud run deploy cleo-slack-service --platform managed --region us-central1 --source=/Users/samyoon/Development/slack_apps/alert_bot --set-env-vars OPENAI_API_KEY=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,DEFAULT_SLACK_BOT_TOKEN=xoxb-5315816251861-5304247088775-R0oJRp6aARrJtXWMVhYi1p3U,SLACK_SIGNING_SECRET=a2c8be465b37ce852415e7eb14c50f8f,SUPABASE_URL=https://hpqsyuyhnurqbsjurdzq.supabase.co,SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhwcXN5dXlobnVycWJzanVyZHpxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTY4NTcxMzU0MywiZXhwIjoyMDAxMjg5NTQzfQ.DbqQn_tm0t6juHOdOl4bY4ZDN91V2TZMXjlQssomgFg,FERNET_KEY=LfN0KaQ_o1N-jLfP57lciaZQMwnJEBS5PaqfNq1pi4A=,MY_SLACK_CLIENT_ID=5315816251861.5318655637123,MY_SLACK_CLIENT_SECRET=7772bb9cd23bfd79088eb9a11ba82a01
+
+# events listener url for PROD, set this at: https://api.slack.com/apps/A059CK9JR3M/event-subscriptions?
+https://api.getcleo.io/slack/events
+
+# events listener url for DEV, set this at: https://api.slack.com/apps/A059CK9JR3M/event-subscriptions?
+https://8c2e-174-68-176-35.ngrok-free.app/slack/events
+
+# nrgrok local dev server CLI command-- uncomment everything below and then copy paste
+OPENAI_API_KEY="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" \
+SLACK_SIGNING_SECRET="a2c8be465b37ce852415e7eb14c50f8f" \
+SUPABASE_URL="https://hpqsyuyhnurqbsjurdzq.supabase.co" \
+SUPABASE_SERVICE_ROLE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhwcXN5dXlobnVycWJzanVyZHpxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTY4NTcxMzU0MywiZXhwIjoyMDAxMjg5NTQzfQ.DbqQn_tm0t6juHOdOl4bY4ZDN91V2TZMXjlQssomgFg" \
+FERNET_KEY="LfN0KaQ_o1N-jLfP57lciaZQMwnJEBS5PaqfNq1pi4A=" \
+SLACK_CLIENT_ID="5315816251861.5318655637123" \
+SLACK_CLIENT_SECRET="7772bb9cd23bfd79088eb9a11ba82a01" \
+python3 app.py
+
+
+
+
